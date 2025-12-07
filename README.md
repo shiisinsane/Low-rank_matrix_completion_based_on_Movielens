@@ -1,4 +1,251 @@
-## 开发日志
+# 低秩矩阵填充：凸方法与非凸方法在MovieLens数据集上的实现与对比
+
+## 一、项目概述
+
+本项目实现了两种经典的低秩矩阵填充算法, **Soft-Impute（凸方法）** 和**交替最小二乘（ALS，非凸方法）**，用于处理MovieLens 10M/20M数据集中的用户-物品评分预测问题。通过5倍交叉验证的均方根误差（RMSE）评估模型性能，对比两种方法在稀疏评分矩阵补全任务中的效果。
+
+## 二、数据集说明
+
+数据集来源: https://grouplens.org/datasets/movielens/
+
+使用**MovieLens 10M**数据集，包含用户对电影的评分记录，格式为稀疏矩阵：
+
+- 行：用户（`UserIdx`）
+- 列：电影（`MovieIdx`）
+- 非零元素：用户对电影的评分
+- 矩阵高度稀疏，因为大部分用户未评分大部分电影，需通过低秩假设补全缺失值
+
+## 三、方法原理与公式推导
+
+### 1. 数据预处理：评分中心化
+
+为消除用户和物品的固有偏差，比如某些用户天生喜欢打高分，先对评分进行中心化处理：
+
+- 全局均值： $\mu = \text{mean}(r_{ui})$（所有观察到的评分均值）
+  
+- 用户偏差： $b_u = \text{mean}(r_{ui} \mid i \in I(u)) - \mu$（用户u的平均评分减去全局均值）
+  
+- 物品偏差： $b_i = \text{mean}(r_{ui} \mid u \in U(i)) - \mu$（物品i的平均评分减去全局均值）
+  中心化评分定义为： 
+  $\hat{r}_ {ui}  = r_{ui} - \mu - b_u - b_i$
+  
+  代码中用`compute_global_user_item_means`函数计算 $\mu, b_u, b_i$，并在模型拟合前转换原始评分为 $\hat{r}_{ui}$
+  
+
+### 2. 凸方法：Soft-Impute
+
+#### 原理
+
+Soft-Impute基于**凸优化**，假设中心化后的评分矩阵 $\hat{R}$可由低秩矩阵 $X$近似，通过奇异值阈值化实现低秩约束，目标函数为：
+
+$$
+\min_{X} \frac{1}{2} | P_\Omega(\hat{R} - X) |_F^2 + \lambda | X |_*
+$$
+
+其中：
+
+- $P_\Omega$为投影算子，仅保留观测到的评分位置
+  
+- $\lambda$为正则化参数，控制低秩程度
+  
+
+#### 求解步骤`PyTorchSoftImpute`
+
+1. **截断奇异值分解（SVD）**：对中心化稀疏矩阵 $\hat{R}$进行截断SVD，保留前k个奇异值： 
+  $\hat{R} \approx U S V^T$ 其中 $U \in \mathbb{R}^{m \times k}$， $S \in \mathbb{R}^{k \times k}$， $V^T \in \mathbb{R}^{k \times n}$
+  
+2. **软阈值处理**：对奇异值施加阈值化，实现核范数正则化: $S'_i = \max(S_i - \lambda, 0)$
+  
+3. **低秩近似矩阵**：保留非零奇异值对应的子矩阵，得到低秩近似： $X = U_k S'_k V_k^T $
+  
+  其中 $U_k, S'_k, V_k^T$为阈值化后保留的奇异向量和奇异值
+  
+4. **预测公式**：
+  
+  对用户 i 和物品 j 的评分预测为： $\hat{r}_{ij} = (U_k[i,:] \cdot S'_k) \cdot V_k^T[:,j] $
+  
+  最终评分需加回中心化偏差： $pred_{ij} = \hat{r}_{ij} + \mu + b_u[i] + b_i[j]$ 
+  
+  代码中的`predict`方法通过分块点积实现，`U_sub * V_sub`对应上述内积
+  
+
+### 3. 非凸方法：交替最小二乘ALS
+
+#### 原理
+
+ALS通过将低秩矩阵X分解为用户因子 $U \in \mathbb{R}^{m \times r}$和物品因子 $V \in \mathbb{R}^{n \times r}（X \approx UV^T）$，目标函数为非凸优化问题：
+
+$$
+\min_{U, V} \frac{1}{2} \sum_{(u,i) \in \Omega} (\hat{r}_{ui} - U_u V_i^T)^2 + \frac{\lambda}{2} \left( \sum_u c_u | U_u |^2 + \sum_i c_i | V_i |^2 \right)
+$$
+
+其中：
+
+- $c_u, c_i$为正则化权重，与用户/物品的评分数量正相关，这里用到了WR（带权重的正则化）思想，算法实质上是ALS-WR
+  
+- $\lambda$为正则化参数
+  
+
+#### 求解步骤`PyTorchALS`
+
+1. **迭代优化**：固定一个因子矩阵，求解另一个因子矩阵，交替进行：
+  
+  - **固定V，更新U**：对每个用户 u，求解正规方程: $(V_{\Omega(u)}^T V_{\Omega(u)} + \lambda c_u I) U_u = V_{\Omega(u)}^T \hat{r}_u $
+    
+    其中： $\Omega(u)$为用户 u 评分过的物品集合， $c_u = \max(1, |\Omega(u)| )$
+    
+  - **固定U，更新V**：对每个物品 i，求解对称的正规方程： 
+    $(U_{\Omega(i)}^T U_{\Omega(i)} + \lambda c_i I) V_i = U_{\Omega(i)}^T \hat{r}_i$
+    
+2. **预测公式**：
+  
+  用户i对物品j的中心化评分预测为： $\hat{r}_{ij} = U_i \cdot V_j$
+  
+  最终评分加回偏差： $pred_{ij} = \hat{r}_{ij} + \mu + b_u[i] + b_i[j]$
+  
+
+## 四、项目结构
+
+```
+
+├── /
+├── get_data.py # 稀疏矩阵存储
+├── test_cuda.py # 初版代码，验证之后发现精度不太行
+└── ALS_softImpute.py # 分别实现凸/非凸方法的正式代码文件
+```
+
+### 1. 预处理数据：get_data.py
+
+该脚本运行前需通过官方脚本`split_ratings.sh` 划分好了5折交叉验证文件，这些文件的格式此时仍是`.dat`
+
+完成划分后，需确保以下文件存在于指定路径：
+
+| 文件/目录 | 路径，与脚本同目录 | 格式说明 |
+| --- | --- | --- |
+| `ratings.dat` | 根目录 | ::分隔的4列数据，列名：UserID, MovieID, Rating, Timestamp |
+| `k-fold/` | 根目录 | 存放5折交叉验证文件，包含：r1.train、r1.test、r2.train…r5.train、r5.test |
+| `k-fold/r{fold}.train` | k-fold子目录 | 同`ratings.dat`格式，为第fold折的训练集 |
+| `k-fold/r{fold}.test` | k-fold子目录 | 同`ratings.dat`格式，为第fold折的测试集 |
+
+需安装以下Python库：
+
+```bash
+pip install pandas numpy scipy
+```
+
+确认输入文件目录结构符合上述要求，直接运行脚本：
+
+```bash
+python get_data.py 
+```
+
+脚本运行后会生成以下文件，均在脚本同级目录：
+
+#### 1）训练稀疏矩阵
+
+- 文件名：`train_matrix_fold{fold}.npz`（fold=1-5）
+- 格式：以`Scipy CSR`**稀疏矩阵格式**进行存储，文件后缀为`.npz`
+- 矩阵形状为`(n_users, n_movies)`，非零元素为对应用户-电影的评分，仅包含训练集数据。
+
+#### 2）测试集文件
+
+- 文件名：`test_set_fold{fold}.csv`（fold=1-5）
+  
+- 格式：CSV文件，无索引列，包含3列：
+  
+  | 列名  | 说明  |
+  | --- | --- |
+  | UserIdx | 连续化用户索引（从0开始） |
+  | MovieIdx | 连续化电影索引（从0开始） |
+  | Rating | 原始评分（1-5） |
+  
+
+#### 3）全局ID映射文件
+
+- 文件名：`id_maps.npz`
+  
+- 包含4个变量：
+  
+  | 变量名 | 类型  | 说明  |
+  | --- | --- | --- |
+  | user_map | 字典  | 原始UserID -->连续UserIdx |
+  | movie_map | 字典  | 原始MovieID -->连续MovieIdx |
+  | n_users | 整数  | 全局唯一用户总数 |
+  | n_movies | 整数  | 全局唯一电影总数 |
+  
+  仅作为备用，后续可通过该文件将模型输出的连续索引还原为原始ID。
+  
+
+### 2. 实验脚本：ALS_softImpute.py
+
+#### 1）工具函数
+
+`compute_global_user_item_means`：计算全局均值、用户偏差、物品偏差，用于评分中心化
+
+#### 2）模型类
+
+`PyTorchSoftImpute`类、`PyTorchALS`类
+
+均有`fit`和`predict`类方法
+
+#### 3）评估与实验
+
+`MatrixCompletionEvaluator`：使用**5折交叉验证**进行评估，加载训练和测试数据，计算**RMSE**
+
+`run_experiments`：对比不同参数的Soft-Impute和ALS模型，输出平均RMSE和运行时间
+
+#### 4）使用方法
+
+执行此脚本前需提前通过`get_data.py`将MovieLens数据集按5折划分并保存为`train_matrix_fold{1-5}.npz`（CSR格式）和`test_set_fold{1-5}.csv`
+
+运行该脚本：
+
+```bash
+python ALS_softImpute.py
+```
+
+结果输出包含各模型RMSE和运行时间的CSV文件`matrix_completion_results_final_xxxx.csv`
+
+## 五、实验设置
+
+- 评价指标：RMSE（均方根误差）：  
+  $\text{RMSE} = \sqrt{\frac{1}{N} \sum_{(u,i) \in \text{test}} (r_{ui} - \text{pred}_{ui})^2}$
+  
+- 参数设置：
+  
+  Soft-Impute： $\lambda \in {1e-4, 5e-5}$， $r=250$
+  
+  ALS：秩 $r \in {200, 250}$， $\lambda=0.02$，最大迭代30次
+
+
+## 附录1: 参考资料
+在完成本实验的过程中, 除了参考最优化课程ppt以外, 还参考了以下资料:
+
+**(1)** 实现soft-Impute算法的时候参考了以下网站: https://grouplens.org/datasets/movielens/
+
+**(2)** 最优化课程推荐阅读文献:
+
+[1] Spectral Regularization Algorithms for Learning Large Incomplete Matrices, 
+2010, J Mach Learn Res. 
+[2] Matrix Completion has No Spurious Local Minimum, NIPS, 2016. 
+
+[3] No Spurious Local Minima in Nonconvex Low Rank Problems: A Unified 
+Geometric Analysis, ICML, 2017.
+
+[4] Low-rank Matrix Completion using Alternating Minimization, NIPS, 2013.
+
+[5] Matrix Factorization Techniques for Recommender Systems, J of Computer, 
+2009.
+
+**(3)** 针对推荐系统常用算法的批判性综述文献:
+
+Rendle, S., Zhang, L., & Koren, Y. (2019). On the Difficulty of Evaluating Baselines: A Study on Recommender Systems. ArXiv, abs/1905.01395.
+
+**(4)** 将ALS改进为ALS-WR以降低RMSE到可容忍标准, 参考了以下文献 (是文献(3)的connected paper): 
+
+Florian Strub, Romaric Gaudel, and Jérémie Mary. 2016. Hybrid Recommender System based on Autoencoders. In Proceedings of the 1st Workshop on Deep Learning for Recommender Systems (DLRS 2016). Association for Computing Machinery, New York, NY, USA, 11–16. https://doi.org/10.1145/2988450.2988456
+
+## 附录2: 实验日志
 
 #### 12.2--->利用movielens 10M官方数据集的split_ratings.sh脚本划分5折交叉验证集
 
