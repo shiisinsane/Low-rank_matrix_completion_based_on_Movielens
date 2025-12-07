@@ -1,6 +1,6 @@
 # final_integrated_matrix_completion.py
 # MovieLens 10/20M — Chunk-safe, center + ALS-WR + Safe Soft-Impute fallback
-# Usage: replace your test_als.py with this file and run.
+# Usage: replace your ALS_softImpute.py with this file and run.
 
 import time
 import warnings
@@ -195,18 +195,22 @@ class PyTorchALS:
 # ------------------------
 class PyTorchSoftImpute:
     """
-    For large sparse matrix we do a one-shot svds and soft-threshold s:
-      - compute svds (U,s,Vt)
-      - shrink s := max(s - lambda, 0)
-      - store (U_k, s_k, Vt_k) for prediction
-    Prediction uses chunked row-wise dot products: pred_ij = (U_k[i,:] * s_k) dot Vt_k[:, j]
+       For large sparse matrix we do a one-shot svds and soft-threshold s:
+        - compute svds (U,s,Vt)
+        - shrink s := max(s - lambda, 0)
+        - store (U_k, s_k, Vt_k) for prediction
+       Prediction uses chunked row-wise dot products: pred_ij = (U_k[i,:] * s_k) dot Vt_k[:, j]
     """
 
     def __init__(self, lambda_reg=1e-4, rank=250, chunk_size=CHUNK_SIZE):
         self.lambda_reg = float(lambda_reg)
         self.rank = int(rank)
         self.chunk_size = int(chunk_size)
-        self.lowrank = None  # (U, s, Vt) numpy on cpu
+        self.lowrank = None  # (U_k, s_k, Vt_k) - numpy on CPU
+        # centering stats
+        self.mu = None
+        self.b_u = None
+        self.b_i = None
 
     def _svds(self, train_csr, k):
         # use scipy.sparse.linalg.svds (may be slow) and return sorted descending
@@ -215,18 +219,30 @@ class PyTorchSoftImpute:
         return u[:, idx].astype(np.float32), s[idx].astype(np.float32), vt[idx, :].astype(np.float32)
 
     def fit(self, train_csr):
-        m, n = train_csr.shape
-        # choose k
-        k = min(self.rank, min(m, n) - 1)
+        # 1) compute centering stats (mu, b_u, b_i)
+        mu, b_u, b_i, _, _ = compute_global_user_item_means(train_csr)
+        self.mu = mu
+        self.b_u = b_u
+        self.b_i = b_i
+
+        # 2) build centered sparse matrix (on CPU) for svds input: r_center = r - mu - b_u[u] - b_i[v]
+        rows, cols = train_csr.nonzero()
+        vals = train_csr.data.astype(np.float32)
+        centered_vals = vals - (mu + b_u[rows] + b_i[cols])
+        # build csr with centered values
+        A_center = csr_matrix((centered_vals, (rows, cols)), shape=train_csr.shape)
+
+        # 3) compute truncated svds
+        k = min(self.rank, min(train_csr.shape) - 1)
         if k <= 0:
-            raise ValueError("rank too large or matrix too small.")
-        print(f"[SoftImpute fallback] computing svds k={k} on CPU (may take time)...")
-        U, s, Vt = self._svds(train_csr, k=k)
-        # shrink
+            self.lowrank = (None, None, None)
+            return self
+        U, s, Vt = self._svds(A_center, k=k)
+
+        # 4) soft-threshold s
         s_shrunk = np.maximum(s - self.lambda_reg, 0.0)
         nz = s_shrunk > 0
         if nz.sum() == 0:
-            print("[SoftImpute] all singular values shrunk to zero; returning global mean fallback.")
             self.lowrank = (None, None, None)
             return self
         self.lowrank = (U[:, nz], s_shrunk[nz], Vt[nz, :])
@@ -237,15 +253,16 @@ class PyTorchSoftImpute:
         vv = np.array(item_idx, dtype=np.int64)
         n = len(uu)
         preds = np.empty(n, dtype=np.float32)
+
         if self.lowrank is None or self.lowrank[0] is None:
-            preds.fill(3.0)
-            return preds
+            preds.fill(self.mu if self.mu is not None else 3.0)
+            return np.clip(preds, 1.0, 5.0)
 
-        U_k, s_k, Vt_k = self.lowrank  # U_k: m x r, Vt_k: r x n_items
-        # precompute V_k = Vt_k.T * s_k (n_items x r)
-        V_k = (Vt_k.T * s_k.reshape(1, -1))  # n_items x r
+        U_k, s_k, Vt_k = self.lowrank  # U_k: m x r, Vt_k: r x n
+        # precompute V_k = Vt_k.T * s_k  -> shape (n_items, r)
+        V_k = (Vt_k.T * s_k.reshape(1, -1))
 
-        # chunked dot products
+        # chunked dot product
         for start in range(0, n, self.chunk_size):
             end = min(start + self.chunk_size, n)
             u_chunk = uu[start:end]
@@ -254,9 +271,11 @@ class PyTorchSoftImpute:
             V_sub = V_k[v_chunk, :]    # chunk x r
             preds[start:end] = np.sum(U_sub * V_sub, axis=1)
 
-        preds = np.clip(preds, 1.0, 5.0)
-        return preds
+        # add back centers
+        if self.mu is not None:
+            preds = preds + self.mu + self.b_u[uu] + self.b_i[vv]
 
+        return np.clip(preds, 1.0, 5.0)
 
 # ------------------------
 # Evaluator
@@ -315,16 +334,16 @@ def run_experiments():
 
     results = []
 
-    # ALS configs
-    als_configs = [
-        {"name": "ALS (rank=250)", "params": {"rank": 250, "lambda_reg": 0.02, "max_iter": 30, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
-        {"name": "ALS (rank=200)", "params": {"rank": 200, "lambda_reg": 0.02, "max_iter": 30, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
+    # Soft-Impute fallback configs
+    soft_configs = [
+        {"name": "SoftImpute (svds λ=1e-4, r=250)", "params": {"lambda_reg": 1e-4, "rank": 250, "chunk_size": CHUNK_SIZE}},
+        {"name": "SoftImpute (svds λ=5e-5, r=250)", "params": {"lambda_reg": 5e-5, "rank": 250, "chunk_size": CHUNK_SIZE}},
     ]
 
-    for cfg in als_configs:
+    for cfg in soft_configs:
         print("\n" + "-" * 60)
         print(f"Running {cfg['name']}")
-        rmse_list, avg_rmse, avg_time = evaluator.evaluate(PyTorchALS, cfg['params'], cfg['name'])
+        rmse_list, avg_rmse, avg_time = evaluator.evaluate(PyTorchSoftImpute, cfg['params'], cfg['name'])
         results.append({
             "Model": cfg['name'],
             "Avg RMSE": avg_rmse,
@@ -336,16 +355,17 @@ def run_experiments():
             "Fold 5 RMSE": rmse_list[4] if len(rmse_list) > 4 else None,
         })
 
-    # Soft-Impute fallback configs
-    soft_configs = [
-        {"name": "SoftImpute (svds λ=1e-4, r=250)", "params": {"lambda_reg": 1e-4, "rank": 250, "chunk_size": CHUNK_SIZE}},
-        {"name": "SoftImpute (svds λ=5e-5, r=250)", "params": {"lambda_reg": 5e-5, "rank": 250, "chunk_size": CHUNK_SIZE}},
+
+    # ALS configs
+    als_configs = [
+        {"name": "ALS (rank=250)", "params": {"rank": 250, "lambda_reg": 0.02, "max_iter": 30, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
+        {"name": "ALS (rank=200)", "params": {"rank": 200, "lambda_reg": 0.02, "max_iter": 30, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
     ]
 
-    for cfg in soft_configs:
+    for cfg in als_configs:
         print("\n" + "-" * 60)
         print(f"Running {cfg['name']}")
-        rmse_list, avg_rmse, avg_time = evaluator.evaluate(PyTorchSoftImpute, cfg['params'], cfg['name'])
+        rmse_list, avg_rmse, avg_time = evaluator.evaluate(PyTorchALS, cfg['params'], cfg['name'])
         results.append({
             "Model": cfg['name'],
             "Avg RMSE": avg_rmse,
