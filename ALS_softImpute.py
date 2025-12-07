@@ -1,6 +1,5 @@
-# final_integrated_matrix_completion.py
-# MovieLens 10/20M — Chunk-safe, center + ALS-WR + Safe Soft-Impute fallback
-# Usage: replace your ALS_softImpute.py with this file and run.
+# MovieLens 10M
+# Chunk, 中心化, ALS-WR, Soft-Impute
 
 import time
 import warnings
@@ -12,33 +11,27 @@ from scipy.sparse.linalg import svds
 
 warnings.filterwarnings('ignore')
 
-# Device and global chunk config
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# Chunk size for operations over all observed ratings or large test sets.
-# Default tuned for ~16GB GPU; reduce if you have less memory.
+# 对所有观测评分集进行操作的块大小，防止内存溢出
 CHUNK_SIZE = int(2_000_000)
 
 
-# ------------------------
-# Utilities: center / stats
-# ------------------------
 def compute_global_user_item_means(train_csr):
     """
-    Compute global mean, user mean (bias), item mean (bias).
-    We'll compute:
-      mu = mean of all observed ratings
-      b_u = mean_{i in I(u)} (r_ui) - mu
-      b_i = mean_{u in U(i)} (r_ui) - mu
-    We'll return these so we can center the matrix: r_center = r - mu - b_u[u] - b_i[i]
-    (This is a one-pass, commonly used centering; iterative refinement is possible but not necessary.)
+    中心化：计算全局平均值、用户平均值/偏置、电影平均值/偏置
+    我们将计算：
+        mu = 所有已观察到评分的平均值
+        b_u = 用户 u 的评分平均值（i 属于 I(u)）减去 mu
+        b_i = 电影 i 的评分平均值（u 属于 U(i)）减去 mu
+    :return r_center = r - mu - b_u[u] - b_i[i]
     """
     rows, cols = train_csr.nonzero()
     ratings = train_csr.data.astype(np.float32)
     mu = float(np.mean(ratings))
 
-    # user means (relative to mu)
+    # 用户均值
     n_users = train_csr.shape[0]
     b_u = np.zeros(n_users, dtype=np.float32)
     counts_u = np.zeros(n_users, dtype=np.int32)
@@ -48,7 +41,7 @@ def compute_global_user_item_means(train_csr):
     nonzero_u = counts_u > 0
     b_u[nonzero_u] = b_u[nonzero_u] / counts_u[nonzero_u] - mu
 
-    # item means (relative to mu)
+    # 电影均值
     n_items = train_csr.shape[1]
     b_i = np.zeros(n_items, dtype=np.float32)
     counts_i = np.zeros(n_items, dtype=np.int32)
@@ -62,12 +55,12 @@ def compute_global_user_item_means(train_csr):
 
 
 # ------------------------
-# ALS (centered + chunk-safe + ALS-WR style)
+# ALS (中心化， chunk化， WR加权正则)
 # ------------------------
 class PyTorchALS:
     """
-    ALS for centered residuals with chunked operations to avoid OOM.
-    We expect caller to pass the raw train sparse matrix; this class will compute center stats itself.
+    针对中心化后的评分残差进行因子分解，使用分块操作以避免内存溢出。
+    传入原始训练稀疏矩阵
     """
 
     def __init__(self, rank=250, lambda_reg=0.02, max_iter=15, tol=1e-4, chunk_size=CHUNK_SIZE):
@@ -77,10 +70,10 @@ class PyTorchALS:
         self.tol = float(tol)
         self.chunk_size = int(chunk_size)
 
-        # learned factors for centered matrix
+        # 中心化后的矩阵的学习因子
         self.U = None  # torch tensor [n_users, rank]
         self.V = None  # torch tensor [n_items, rank]
-        # stored centering stats
+        # 和中心化有关的统计量
         self.global_mean = None
         self.user_bias = None  # numpy
         self.item_bias = None  # numpy
@@ -90,7 +83,7 @@ class PyTorchALS:
         self.V = torch.randn(n_items, self.rank, dtype=torch.float32, device=device) * 0.01
 
     def _chunked_preds(self, rows_t, cols_t):
-        """Compute predictions for given index arrays (torch tensors) in chunks."""
+        """对给定索引数组（torch tensor）分块计算预测"""
         n = len(rows_t)
         preds = torch.empty(n, dtype=torch.float32, device=device)
         for start in range(0, n, self.chunk_size):
@@ -101,7 +94,7 @@ class PyTorchALS:
         return preds
 
     def fit(self, train_csr):
-        # compute centering stats
+        # 计算中心化的统计量
         mu, b_u, b_i, counts_u, counts_i = compute_global_user_item_means(train_csr)
         self.global_mean = float(mu)
         self.user_bias = b_u  # np array
@@ -109,39 +102,39 @@ class PyTorchALS:
         n_users, n_items = train_csr.shape
         self._initialize(n_users, n_items)
 
-        # prepare observed arrays
+        # 准备观测数组
         rows, cols = train_csr.nonzero()
         ratings = train_csr.data.astype(np.float32)
-        # centered ratings (r - mu - b_u - b_i)
+        # 中心化评分 (r - mu - b_u - b_i)
         centered = ratings - (mu + b_u[rows] + b_i[cols])
 
-        # tensors
         rows_t = torch.tensor(rows, dtype=torch.long, device=device)
         cols_t = torch.tensor(cols, dtype=torch.long, device=device)
         centered_t = torch.tensor(centered, dtype=torch.float32, device=device)
 
         prev_mse = float('inf')
-        # iterative ALS
+        # ALS算法迭代
         for it in range(self.max_iter):
-            # update users
+            # 更新用户
             unique_users = torch.unique(rows_t)
             for user in unique_users:
                 mask = (rows_t == user)
                 item_idx = cols_t[mask]
-                y = centered_t[mask]  # centered observed vector for user
+                y = centered_t[mask]  # 该用户对这些物品的中心化评分
 
-                V_sub = self.V[item_idx]  # k x r
-                # normal eq: (V_sub^T V_sub + λ * |I(u)| I) u = V_sub^T y
-                VTV = V_sub.T @ V_sub
-                reg_scale = float(max(1, int((mask.sum().item()))))  # scale reg by number of observations
-                reg = self.lambda_reg * reg_scale * torch.eye(self.rank, device=device, dtype=torch.float32)
+                V_sub = self.V[item_idx]  # 提取这些物品的因子向量，k x r
+                # eq: (V_sub^T V_sub + λ * |I(u)| I) u = V_sub^T y
+                VTV = V_sub.T @ V_sub # 物品因子的协方差矩阵
+                reg_scale = float(max(1, int((mask.sum().item()))))  # 正则化缩放因子：该用户的评分数量
+                reg = self.lambda_reg * reg_scale * torch.eye(self.rank, device=device, dtype=torch.float32) # 正则化矩阵
                 b = V_sub.T @ y
+                # 求解线性方程得到当前用户的因子向量
                 try:
                     self.U[user] = torch.linalg.solve(VTV + reg, b)
                 except Exception:
                     self.U[user] = torch.linalg.pinv(VTV + reg) @ b
 
-            # update items
+            # 更新电影
             unique_items = torch.unique(cols_t)
             for item in unique_items:
                 mask = (cols_t == item)
@@ -158,7 +151,7 @@ class PyTorchALS:
                 except Exception:
                     self.V[item] = torch.linalg.pinv(UTU + reg) @ b
 
-            # compute mse on centered data
+            # 计算中心化数据上的MSE
             preds = self._chunked_preds(rows_t, cols_t)
             mse = torch.mean((centered_t - preds) ** 2).item()
             print(f"[ALS] iter {it+1}/{self.max_iter}, centered MSE={mse:.6f}")
@@ -170,13 +163,12 @@ class PyTorchALS:
         return self
 
     def predict(self, user_idx, item_idx):
-        # accepts numpy arrays / lists
         uu = np.array(user_idx, dtype=np.int64)
         vv = np.array(item_idx, dtype=np.int64)
         n = len(uu)
         preds = np.empty(n, dtype=np.float32)
 
-        # batch in chunks
+        # 分批处理
         for start in range(0, n, self.chunk_size):
             end = min(start + self.chunk_size, n)
             uu_chunk = torch.tensor(uu[start:end], dtype=torch.long, device=device)
@@ -184,22 +176,22 @@ class PyTorchALS:
             pred_chunk = torch.sum(self.U[uu_chunk] * self.V[vv_chunk], dim=1).cpu().numpy()
             preds[start:end] = pred_chunk
 
-        # add back centers: mu + b_u + b_i
+        # 添加偏置以还原中心化影响: mu + b_u + b_i
         preds = preds + self.global_mean + self.user_bias[uu] + self.item_bias[vv]
         preds = np.clip(preds, 1.0, 5.0)
         return preds
 
 
 # ------------------------
-# Soft-Impute fallback (safe low-rank svds + chunk predict)
+# Soft-Impute (低秩svds，chunk化)
 # ------------------------
 class PyTorchSoftImpute:
     """
-       For large sparse matrix we do a one-shot svds and soft-threshold s:
-        - compute svds (U,s,Vt)
-        - shrink s := max(s - lambda, 0)
-        - store (U_k, s_k, Vt_k) for prediction
-       Prediction uses chunked row-wise dot products: pred_ij = (U_k[i,:] * s_k) dot Vt_k[:, j]
+       对于大稀疏矩阵，采用一次性截断奇异值分解（svds）并对奇异值s进行软阈值处理
+        - 计算截断奇异值分解 (U,s,Vt)
+        - 收缩s := max(s - lambda, 0)
+        - 存储(U_k, s_k, Vt_k)用于预测
+       预测过程采用分块的行向点积： pred_ij = (U_k[i,:] * s_k) dot Vt_k[:, j]
     """
 
     def __init__(self, lambda_reg=1e-4, rank=250, chunk_size=CHUNK_SIZE):
@@ -207,39 +199,39 @@ class PyTorchSoftImpute:
         self.rank = int(rank)
         self.chunk_size = int(chunk_size)
         self.lowrank = None  # (U_k, s_k, Vt_k) - numpy on CPU
-        # centering stats
+        # 中心化统计量
         self.mu = None
         self.b_u = None
         self.b_i = None
 
     def _svds(self, train_csr, k):
-        # use scipy.sparse.linalg.svds (may be slow) and return sorted descending
+        # 使用scipy.sparse.linalg.svds，返回降序排序后的结果
         u, s, vt = svds(train_csr.astype(np.float64), k=k)
         idx = np.argsort(s)[::-1]
         return u[:, idx].astype(np.float32), s[idx].astype(np.float32), vt[idx, :].astype(np.float32)
 
     def fit(self, train_csr):
-        # 1) compute centering stats (mu, b_u, b_i)
+        # 1) 计算中心化数据 (mu, b_u, b_i)
         mu, b_u, b_i, _, _ = compute_global_user_item_means(train_csr)
         self.mu = mu
         self.b_u = b_u
         self.b_i = b_i
 
-        # 2) build centered sparse matrix (on CPU) for svds input: r_center = r - mu - b_u[u] - b_i[v]
+        # 2) 构建在CPU上的中心化稀疏矩阵作为svds的输入: r_center = r - mu - b_u[u] - b_i[v]
         rows, cols = train_csr.nonzero()
         vals = train_csr.data.astype(np.float32)
         centered_vals = vals - (mu + b_u[rows] + b_i[cols])
-        # build csr with centered values
+        # 构建带有中心化值的CSR矩阵
         A_center = csr_matrix((centered_vals, (rows, cols)), shape=train_csr.shape)
 
-        # 3) compute truncated svds
+        # 3) 计算截断奇异值分解
         k = min(self.rank, min(train_csr.shape) - 1)
         if k <= 0:
             self.lowrank = (None, None, None)
             return self
         U, s, Vt = self._svds(A_center, k=k)
 
-        # 4) soft-threshold s
+        # 4) 对s进行软阈值操作
         s_shrunk = np.maximum(s - self.lambda_reg, 0.0)
         nz = s_shrunk > 0
         if nz.sum() == 0:
@@ -259,10 +251,10 @@ class PyTorchSoftImpute:
             return np.clip(preds, 1.0, 5.0)
 
         U_k, s_k, Vt_k = self.lowrank  # U_k: m x r, Vt_k: r x n
-        # precompute V_k = Vt_k.T * s_k  -> shape (n_items, r)
+        # 预计算V_k = Vt_k.T * s_k  -> 形状(n_items, r)
         V_k = (Vt_k.T * s_k.reshape(1, -1))
 
-        # chunked dot product
+        # 分块点积
         for start in range(0, n, self.chunk_size):
             end = min(start + self.chunk_size, n)
             u_chunk = uu[start:end]
@@ -271,14 +263,14 @@ class PyTorchSoftImpute:
             V_sub = V_k[v_chunk, :]    # chunk x r
             preds[start:end] = np.sum(U_sub * V_sub, axis=1)
 
-        # add back centers
+        # 用偏置还原
         if self.mu is not None:
             preds = preds + self.mu + self.b_u[uu] + self.b_i[vv]
 
         return np.clip(preds, 1.0, 5.0)
 
 # ------------------------
-# Evaluator
+# 评估预测
 # ------------------------
 class MatrixCompletionEvaluator:
     def __init__(self, n_folds=5, chunk_size=CHUNK_SIZE):
@@ -327,14 +319,14 @@ class MatrixCompletionEvaluator:
 
 
 # ------------------------
-# Experiment runner
+# 运行两种实验算法
 # ------------------------
 def run_experiments():
     evaluator = MatrixCompletionEvaluator(n_folds=5, chunk_size=CHUNK_SIZE)
 
     results = []
 
-    # Soft-Impute fallback configs
+    # Soft-Impute设置
     soft_configs = [
         {"name": "SoftImpute (svds λ=1e-4, r=250)", "params": {"lambda_reg": 1e-4, "rank": 250, "chunk_size": CHUNK_SIZE}},
         {"name": "SoftImpute (svds λ=5e-5, r=250)", "params": {"lambda_reg": 5e-5, "rank": 250, "chunk_size": CHUNK_SIZE}},
@@ -356,7 +348,7 @@ def run_experiments():
         })
 
 
-    # ALS configs
+    # ALS设置
     als_configs = [
         {"name": "ALS (rank=250)", "params": {"rank": 250, "lambda_reg": 0.02, "max_iter": 30, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
         {"name": "ALS (rank=200)", "params": {"rank": 200, "lambda_reg": 0.02, "max_iter": 30, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
