@@ -227,6 +227,7 @@ python ALS_softImpute.py
 
 [1] Spectral Regularization Algorithms for Learning Large Incomplete Matrices, 
 2010, J Mach Learn Res. 
+
 [2] Matrix Completion has No Spurious Local Minimum, NIPS, 2016. 
 
 [3] No Spurious Local Minima in Nonconvex Low Rank Problems: A Unified 
