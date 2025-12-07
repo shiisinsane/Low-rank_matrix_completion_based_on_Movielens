@@ -366,17 +366,17 @@ def run_als_experiment():
 
     # 测试不同的ALS配置
     als_configs = [
+        # {
+        #     "name": "ALS (rank=10)",
+        #     "params": {"rank": 10, "lambda_reg": 0.1, "max_iter": 15, "tol": 1e-3}
+        # },
         {
-            "name": "ALS (rank=10)",
-            "params": {"rank": 10, "lambda_reg": 0.1, "max_iter": 15, "tol": 1e-3}
+            "name": "ALS (rank=30)",
+            "params": {"rank": 30, "lambda_reg": 0.05, "max_iter": 25, "tol": 1e-4}
         },
         {
-            "name": "ALS (rank=20)",
-            "params": {"rank": 20, "lambda_reg": 0.05, "max_iter": 20, "tol": 1e-4}
-        },
-        {
-            "name": "ALS (rank=50)",
-            "params": {"rank": 50, "lambda_reg": 0.01, "max_iter": 25, "tol": 1e-4}
+            "name": "ALS (rank=40)",
+            "params": {"rank": 40, "lambda_reg": 0.01, "max_iter": 25, "tol": 1e-4}
         }
     ]
 
@@ -420,17 +420,17 @@ def run_softimpute_experiment():
 
     # 测试不同的Soft-Impute配置
     softimpute_configs = [
-        {
-            "name": "Soft-Impute (λ=0.5)",
-            "params": {"lambda_reg": 0.5, "max_iter": 30, "tol": 1e-4, "rank": 100}
-        },
+        # {
+        #     "name": "Soft-Impute (λ=0.5)",
+        #     "params": {"lambda_reg": 0.5, "max_iter": 30, "tol": 1e-4, "rank": 100}
+        # },
         {
             "name": "Soft-Impute (λ=0.1)",
-            "params": {"lambda_reg": 0.1, "max_iter": 40, "tol": 1e-4, "rank": 100}
+            "params": {"lambda_reg": 0.1, "max_iter": 30, "tol": 1e-4, "rank": 30}
         },
         {
             "name": "Soft-Impute (λ=0.01)",
-            "params": {"lambda_reg": 0.01, "max_iter": 50, "tol": 1e-4, "rank": 100}
+            "params": {"lambda_reg": 0.01, "max_iter": 30, "tol": 1e-4, "rank": 30}
         }
     ]
 
