@@ -221,7 +221,7 @@ python ALS_softImpute.py
 ## 附录1: 参考资料
 在完成本实验的过程中, 除了参考最优化课程ppt以外, 还参考了以下资料:
 
-**(1)** 实现soft-Impute算法的时候参考了以下网站: https://grouplens.org/datasets/movielens/
+**(1)** 实现soft-Impute算法的时候参考了以下网站: http://web.stanford.edu/~hastie/swData.htm
 
 **(2)** 最优化课程推荐阅读文献:
 
