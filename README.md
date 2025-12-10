@@ -250,6 +250,8 @@ Florian Strub, Romaric Gaudel, and Jérémie Mary. 2016. Hybrid Recommender Syst
 
 维基百科：https://en.wikipedia.org/wiki/Netflix_Prize
 
+Netflix Prize LeaderBoard：[https://web.archive.org/web/20131213101429/http://www.netflixprize.com//leaderboard?showtest=t&limit=20](https://web.archive.org/web/20131213101429/http://www.netflixprize.com//leaderboard?showtest=t&limit=20)
+
 文献：Koren, Y. (2009). The BellKor Solution to the Netflix Grand Prize.
 
 ## 附录2: 实验日志
