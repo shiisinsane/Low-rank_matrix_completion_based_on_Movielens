@@ -246,6 +246,12 @@ Rendle, S., Zhang, L., & Koren, Y. (2019). On the Difficulty of Evaluating Basel
 
 Florian Strub, Romaric Gaudel, and Jérémie Mary. 2016. Hybrid Recommender System based on Autoencoders. In Proceedings of the 1st Workshop on Deep Learning for Recommender Systems (DLRS 2016). Association for Computing Machinery, New York, NY, USA, 11–16. https://doi.org/10.1145/2988450.2988456
 
+**（5）** 历史baseline参考及其参数信息来源：
+
+维基百科：https://en.wikipedia.org/wiki/Netflix_Prize
+
+文献：Koren, Y. (2009). The BellKor Solution to the Netflix Grand Prize.
+
 ## 附录2: 实验日志
 
 #### 12.2--->利用movielens 10M官方数据集的split_ratings.sh脚本划分5折交叉验证集
@@ -285,7 +291,7 @@ chmod +x allbut.pl
 
 ---> 解决方式: ALS中改用小批量方式(chunks/batches)计算residual
 
----> 结果: ALS可以正常运行, soft-Impute还是爆显存 ---> 并非chunk的问题, 可能是fallback预测公式写错了
+---> 结果: ALS可以正常运行, soft-Impute还是爆显存 ---> 并非chunk的问题, 可能是公式写错了
 
 ---> 进一步修改结果: 两种算法均可正常运行, ALS精度达到0.94的级别, 但soft-Impute精度失常
 
@@ -314,14 +320,37 @@ chmod +x allbut.pl
 ---> 解决方式: 对soft-Impute又参考了一下Spectral Regularization Algorithms for Learning Large Incomplete Matrices这篇文献, 进行了算法修改;
 ALS在GPU上一次求解很多小型的线性问题, 有大量的GPU kernel调用, 但搬到CPU上求解可能反而更快, 使用GPU并没有实质上的提速, 改进了一下device的利用
 
----> 结果: 精度好像没什么变化
+---> 结果: 精度好像没什么变化；运行时间还是都很长
 
-| Model                                | Avg RMSE | Avg Time (s) | Fold 1 RMSE | Fold 2 RMSE | Fold 3 RMSE | Fold 4 RMSE | Fold 5 RMSE |
-| ------------------------------------ | -------- | ------------ | ----------- | ----------- | ----------- | ----------- | ----------- |
-| SoftImpute (svds lambda=1e-4, r=250) | 0.943759 | 1868.097     | 0.945405    | 0.944344    | 0.942378    | 0.944657    | 0.94201     |
-| SoftImpute (svds lambda=5e-5, r=250) | 0.943759 | 1761.428     | 0.945405    | 0.944344    | 0.942378    | 0.944657    | 0.94201     |
-| ALS (rank=250)                       | 0.943756 | 1354.438     | 0.945404    | 0.944342    | 0.94237     | 0.944654    | 0.94201     |
-| ALS (rank=200)                       | 0.943757 | 880.6369     | 0.945404    | 0.944342    | 0.942371    | 0.944655    | 0.94201     |
+#### 12.10 ---> 继续解决了一系列bug：
+
+#### （1）添加了更加公平的时间对比方式：两种算法达到同一精度所用时间；
+
+#### （2）两种算法均使用“随机SVD”代替原始的SVD，以加快时间；
+
+#### （3）调整softImpute正则化系数数量级，适配其奇异值的数量级以便做软阈值操作；
+
+#### （4）修改ALS初始化方式：将小随机初始化改为SVD初始化以加速
+
+#### （5）降低两种算法的rank参数
+
+----> 结果：算法运行时间明显快了一些；精度倒是没有什么改变
+
+| Model                             | Avg RMSE | Avg Time (s) | Fold 1 RMSE | Fold 2 RMSE | Fold 3 RMSE | Fold 4 RMSE | Fold 5 RMSE |
+| --------------------------------- | -------- | ------------ | ----------- | ----------- | ----------- | ----------- | ----------- |
+| SoftImpute(svds_lambda=80_r=150)  | 0.943757 | 364.1642     | 0.945404    | 0.944342    | 0.942373    | 0.944654    | 0.94201     |
+| SoftImpute(svds_lambda=100_r=200) | 0.943757 | 339.0217     | 0.945404    | 0.944342    | 0.942373    | 0.944654    | 0.94201     |
+| ALS(rank=150)                     | 0.943757 | 348.0491     | 0.945405    | 0.944343    | 0.942371    | 0.944655    | 0.942011    |
+| ALS(rank=200)                     | 0.943757 | 595.8006     | 0.945404    | 0.944342    | 0.942372    | 0.944654    | 0.94201     |
+
+各模型平均达到目标精度的时间（target MSE = 0.85）：
+
+| model_name                        | avg  time（s）   | std count |
+| --------------------------------- | -------- | --------- |
+| ALS(rank=150)                     | 16.37189 | 3.146436  |
+| ALS(rank=200)                     | 29.67463 | 3.142044  |
+| SoftImpute(svds lambda=100 r=200) | 23.06343 | 3.74411   |
+| SoftImpute(svds lambda=80 r=150)  | 23.42607 | 1.046526  |
 
 
 
