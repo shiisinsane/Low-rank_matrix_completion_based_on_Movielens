@@ -228,17 +228,21 @@ $$
   
   Soft-Impute： $\lambda \in {80, 100}$，秩 $r \in {50, 100, 150, 200}$
   
-  ALS： $\lambda=0.02$， 秩 $r \in {50, 100, 150, 200}$
+  ALS：初始 $\lambda_0=0.02$， 秩 $r \in {50, 100, 150, 200}$
 
 ## 六、实验结果
 ### 1. 预测性能
-所有算法配置都达到了非常接近的预测精度，RMSE差异在小数点后第6位。**ALS(rank=50)表现最佳，RMSE为0.943756**。根据Netflix Prize LeaderBoard提供的Baseline，**我们的所有结果均已进入了Cinematch的基线（0.9514）**，是一次成功的实验。
+所有算法配置都达到了非常接近的预测精度，RMSE差异在小数点后第6位。**ALS(rank=50)表现最佳，RMSE为0.943756**。
+
+根据Netflix Prize LeaderBoard提供的Baseline，全球冠军队伍的最好成绩为0.8567，而Netflix指定的Cinematch为0.9525，因此我们认为，本实验结果在   $[0.8567,0.9525)$  这一区间范围时即可被认定为正确结果。
+
+**--> 我们的所有结果均已进入了Cinematch的基线（0.9525），并不异常低于Winning Goal（0.8567），因此是一次成功的实验。**
 ### 2. 时间代价
 同时我们发现，秩参数对预测性能影响相对较小，所有秩参数设置的RMSE都基本相同；但在计算效率方面，**ALS算法在低秩参数设置下显著优于SoftImpute**，ALS(rank=50)比SoftImpute(rank=50)快约3倍（64.78s/203.28s）。随着秩参数增加，两种算法的运行时间都显著增加，如图所示：
 
 ![time_result](time_comparison.png)
 
-更加详细的训练结果请见`/history`和`matrix_completion_results_final_xxxx.csv`。
+更加详细的训练结果请见`/history`、`time_analysis.csv`和`matrix_completion_results_final_xxxx.csv`。
 ### 3. 启示
 针对这个结果，我们对未来可能继续进行的改进工作有如下认识：
 
