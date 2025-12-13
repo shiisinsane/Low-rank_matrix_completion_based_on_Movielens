@@ -10,19 +10,18 @@ class HistoryTimeAnalyzer:
     def __init__(self, history_dir="history"):
         self.history_dir = history_dir
         self._check_history_dir()
-        # 复用test1中定义的历史文件命名规则
         self.history_files = glob(os.path.join(history_dir, "*_fold*_history.npz"))
         if not self.history_files:
             raise FileNotFoundError(f"在{history_dir}目录下未找到历史文件")
 
     def _check_history_dir(self):
-        """检查历史文件目录是否存在（复用test1中的目录创建逻辑）"""
+        """检查历史文件目录是否存在"""
         if not os.path.exists(self.history_dir):
             raise NotADirectoryError(f"历史文件目录{self.history_dir}不存在")
 
     def _parse_model_info(self, filename):
-        """解析文件名，提取模型名称和折数（与test1中_save_history的命名对应）"""
-        # 文件名格式：{model_name}_fold{fold}_history.npz
+        """解析文件名，提取模型名称和折数（与主训练文件中_save_history的命名对应）"""
+        # 文件名格式{model_name}_fold{fold}_history.npz
         base_name = os.path.basename(filename)
         model_part, fold_part = base_name.split("_fold")
         model_name = model_part.replace("_", " ")  # 恢复保存时替换的空格
@@ -31,7 +30,7 @@ class HistoryTimeAnalyzer:
 
     def _get_time_to_target(self, iter_history, target_mse):
         """
-        计算达到目标精度的时间（复用test1中潜在的时间计算逻辑）
+        计算达到目标精度的时间
         :param iter_history: 从历史文件加载的迭代记录，shape=(n_iter, 2)，列=[时间, MSE]
         :param target_mse: 目标精度（MSE）
         :return: 达到目标的时间（秒），未达到则返回np.nan
@@ -39,7 +38,7 @@ class HistoryTimeAnalyzer:
         if len(iter_history) == 0:
             return np.nan
 
-        # 遍历迭代历史，找到首次MSE <= 目标值的时间
+        # 遍历迭代历史，找到首次MSE<=目标值的时间
         for time_elapsed, mse in iter_history:
             if mse <= target_mse:
                 return time_elapsed
@@ -47,7 +46,7 @@ class HistoryTimeAnalyzer:
 
     def _extract_rank(self, model_name):
         """
-        精准提取模型名中的rank数值（适配：ALS含rank=、SoftImpute含r=）
+        精准提取模型名中的rank数值（适配ALS含rank=、SoftImpute含r=）
         示例匹配：
         - ALS rank=5 → 5
         - ALS_rank=10 → 10

@@ -1,6 +1,6 @@
 # MovieLens 10M
 # Chunk, 中心化, ALS-WR, Soft-Impute
-# 修改版：增加迭代历史记录(iter_history)、GPU同步与保存每折历史文件
+# 保存每折历史文件
 
 import time
 import warnings
@@ -73,11 +73,11 @@ class PyTorchALS:
         self.global_mean = None
         self.user_bias = None
         self.item_bias = None
-        # 训练历史（每次迭代保存 elapsed_seconds, observed_centered_MSE）
+        # 训练历史（每次迭代保存elapsed_seconds, observed_centered_MSE）
         self.iter_history = []
 
     def _chunked_preds_torch(self, rows_t, cols_t):
-        """torch版本分块预测"""
+        """分块预测"""
         n = len(rows_t)
         preds = torch.empty(n, dtype=torch.float32, device=device)
         for start in range(0, n, self.chunk_size):
@@ -98,11 +98,10 @@ class PyTorchALS:
         # 2) 提取稀疏观测（numpy）
         rows, cols = train_csr.nonzero()
         ratings = train_csr.data.astype(np.float32)
-        # centered = r - mu - b_u[rows] - b_i[cols]
         centered = ratings - (mu + b_u[rows] + b_i[cols])
 
-        # 3) 构造 per-user / per-item 索引和观测值列表
-        # 转成 numpy arrays
+        # 3) 构造per-user/per-item索引和观测值列表
+        # 转成numpy arrays
         user_items = [[] for _ in range(n_users)]
         user_vals = [[] for _ in range(n_users)]
         item_users = [[] for _ in range(n_items)]
@@ -130,27 +129,27 @@ class PyTorchALS:
             print("Performing truncated SVD initialization ...")
 
             # 构造中心化后的稀疏矩阵（仅对观测位置赋值）
-            # 注意：不是构建稠密矩阵，而是直接对稀疏CSR使用svds（更稳）
+            # 注意：不是构建稠密矩阵，而是直接对稀疏CSR使用svds
             from scipy.sparse.linalg import svds
 
-            # 计算rank r_init 的截断 SVD
+            # 计算rank r_init的截断SVD
             U0, s0, Vt0 = svds(train_csr.astype(np.float64), k=r_init)
 
-            # svds 返回的奇异值是从小到大排序的，需要翻转
+            # svds返回的奇异值是从小到大排序的，需要翻转
             s0 = s0[::-1].astype(np.float32)  # (r_init,)
             U0 = U0[:, ::-1].astype(np.float32)  # (n_users, r_init)
             Vt0 = Vt0[::-1, :].astype(np.float32)  # (r_init, n_items)
 
-            # 按 ALS 的标准方式初始化：U = U0 * sqrt(s)，V = V0 * sqrt(s)
+            # 初始化：U = U0 * sqrt(s)，V = V0 * sqrt(s)
             sqrt_s = np.sqrt(s0)
             U_cpu = np.zeros((n_users, self.rank), dtype=np.float32)
             V_cpu = np.zeros((n_items, self.rank), dtype=np.float32)
 
-            # 前 r_init 维用SVD初始化
+            # 前r_init维用SVD初始化
             U_cpu[:, :r_init] = U0 * sqrt_s.reshape(1, -1)
             V_cpu[:, :r_init] = (Vt0.T) * sqrt_s.reshape(1, -1)
 
-            # 剩下维度仍然用随机初始化（保持与原逻辑一致）
+            # 剩下维度仍然用随机初始化
             if self.rank > r_init:
                 U_cpu[:, r_init:] = (rng.randn(n_users, self.rank - r_init).astype(np.float32) * 0.01)
                 V_cpu[:, r_init:] = (rng.randn(n_items, self.rank - r_init).astype(np.float32) * 0.01)
@@ -167,7 +166,7 @@ class PyTorchALS:
         self.iter_history = []
         fit_start_time = time.time()
         prev_mse = float('inf')
-        # ALS 迭代，在CPU上用Cholesky解小系统
+        # ALS迭代，在CPU上用Cholesky解小系统
         for it in range(self.max_iter):
             # ---- 更新用户向量U ----
             for u in range(n_users):
@@ -180,7 +179,7 @@ class PyTorchALS:
                 reg_scale = max(1, items.size)
                 A = VTV + (self.lambda_reg * reg_scale) * np.eye(self.rank, dtype=np.float32)
                 b = V_sub.T @ user_vals[u] # r,
-                # 求解 Ax=b，优先用Cholesky
+                # 求解Ax=b，优先用Cholesky
                 try:
                     c, lower = sla.cho_factor(A, check_finite=False)
                     U_cpu[u, :] = sla.cho_solve((c, lower), b, check_finite=False)
@@ -232,7 +231,7 @@ class PyTorchALS:
         self.U = torch.tensor(U_cpu, dtype=torch.float32, device=device)
         self.V = torch.tensor(V_cpu, dtype=torch.float32, device=device)
 
-        # 记录最终metric与总耗时（在记录前同步GPU以保证计时准确）
+        # 记录最终metric与总耗时（在记录前同步GPU，以保证计时准确）
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         self.final_metric = mse
@@ -263,13 +262,12 @@ class PyTorchALS:
 # --------------------------------------
 class PyTorchSoftImpute:
     """
-    Soft-Impute 对中心化矩阵进行阶数k的截断SVD，并对奇异值做 soft-threshold (s - lambda)+，
+    Soft-Impute 对中心化矩阵进行阶数k的截断SVD，并对奇异值做soft-threshold (s - lambda)+，
     再用该低秩矩阵在未观察位置填充，于观察位置保持原值。
-    增加改动：
-      - 记录 self.iter_history：[(elapsed_seconds, observed_centered_MSE), ...]
-      - 训练结束后记录 self.final_metric, self.total_fit_time
-      - 每次迭代计算“已观察位置上的中心化MSE”（与ALS统一度量）
-      - 在使用GPU时训练结束前同步 GPU，保证计时公平
+    - 记录 self.iter_history：[(elapsed_seconds, observed_centered_MSE), ...]
+    - 训练结束后记录self.final_metric, self.total_fit_time
+    - 每次迭代计算“已观察位置上的中心化MSE”
+    - 在使用GPU时训练结束前同步GPU，保证计时公平
     """
     def __init__(self, rank=250, lambda_reg=1e-4, max_iter=15, tol=1e-4,
                  randomized=True, n_iter_svd=7, chunk_size=CHUNK_SIZE):
@@ -315,12 +313,6 @@ class PyTorchSoftImpute:
     def fit(self, train_csr):
         """
         对训练稀疏矩阵进行中心化后，执行Soft-Impute。
-        修复内容：
-          - 修复“覆盖观测值导致 obs_mse 恒为0”的问题（核心问题）
-          - 把观测位置MSE放在覆盖前计算（正确做法）
-          - 增加奇异值 shrink 前后的 debug 打印
-          - 记录 (elapsed, obs_mse_recon) 到 iter_history
-          - 保持整体结构与原代码一致，不做重构
         """
         # ----- 1) 中心化统计 -----
         mu, b_u, b_i, _, _ = compute_global_user_item_means(train_csr)
@@ -342,16 +334,16 @@ class PyTorchSoftImpute:
         vals = train_csr.data.astype(np.float32)
         centered_vals = vals - (self.mu + b_u[rows] + b_i[cols])
 
-        # ----- 2) 构造稠密填充矩阵 X -----
+        # ----- 2) 构造稠密填充矩阵X -----
         try:
             X = np.zeros((m, n), dtype=np.float32)
             X[rows, cols] = centered_vals
         except Exception as e:
             raise MemoryError(
-                "构建稠密矩阵 X 失败（内存不足）。需要改为稀疏+分块SVD实现。"
+                "构建稠密矩阵X失败（内存不足）。需要改为稀疏+分块SVD实现。"
             ) from e
 
-        # ----- 3) Soft-Impute 迭代 -----
+        # ----- 3) Soft-Impute迭代 -----
         prev_frob = float('inf')
         self.iter_history = []
         fit_start_time = time.time()
@@ -360,7 +352,7 @@ class PyTorchSoftImpute:
             # === SVD ===
             U, s, Vt = self._truncated_svd(X, k=k)
 
-            # --- Debug：打印前几项奇异值 ---
+            # --- Debug打印前几项奇异值 ---
             topk = min(8, len(s))
             print(f"  raw singulars (top {topk}): {s[:topk]}")
 
@@ -370,7 +362,7 @@ class PyTorchSoftImpute:
 
             nz = s_shrunk > 0
 
-            # === 重构 X_recon ===
+            # === 重构X_recon ===
             if nz.sum() == 0:
                 # 所有奇异值被削为0
                 X_recon = np.zeros_like(X)
@@ -379,20 +371,20 @@ class PyTorchSoftImpute:
                 s_k = s_shrunk[nz]  # (r',)
                 Vt_k = Vt[nz, :]  # (r', n)
 
-                # 计算 X_recon = U_k * diag(s_k) * Vt_k
+                # 计算X_recon = U_k * diag(s_k) * Vt_k
                 # 为提高效率，构造 V_k = Vt_k.T * s_k
                 V_k = (Vt_k.T * s_k.reshape(1, -1))  # shape (n, r')
                 X_recon = U_k @ V_k.T  # (m, n)
 
-            # === 计算观测位置上的重构误差（覆盖前）===
+            # === 计算观测位置上的重构误差===
             preds_obs_recon = X_recon[rows, cols]
             obs_mse_recon = float(np.mean((centered_vals - preds_obs_recon) ** 2))
 
-            # === 覆盖观测值（Soft-Impute 必须）===
+            # === 覆盖观测值===
             X_new = X_recon.copy()
             X_new[rows, cols] = centered_vals
 
-            # === 收敛判定 ===
+            # === 收敛判定===
             frob_diff = np.linalg.norm(X_new - X, ord='fro')
 
             elapsed = time.time() - fit_start_time
@@ -406,20 +398,20 @@ class PyTorchSoftImpute:
                 f"elapsed={elapsed:.2f}s"
             )
 
-            # 更新 X
+            # 更新X
             X = X_new
 
             if frob_diff < self.tol:
                 print(f"[SoftImpute] Converged at iter {it + 1}")
                 break
 
-        # ======= 保存最终低秩因子 =======
+        # ======= 保存最终低秩因子=======
         if nz.sum() > 0:
             self.lowrank = (U_k, s_k, Vt_k)
         else:
             self.lowrank = (None, None, None)
 
-        # GPU 同步（如有）
+        # GPU同步
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
@@ -449,9 +441,6 @@ class PyTorchSoftImpute:
             end = min(start + self.chunk_size, n)
             up = uu[start:end]
             vp = vv[start:end]
-            # (u,:) dot diag(s_k) dot (v,:)^T
-            # = sum_j ( U_k[u,j] * s_k[j] * V_k[v,j] ),
-            #   若V_k = Vt_k^T * diag(s_k)
             U_part = U_k[up, :]          # (p, r')
             V_part = Vt_k[:, vp].T       # (p, r')
             preds_center[start:end] = np.sum(U_part * (s_k * V_part), axis=1)
@@ -471,7 +460,8 @@ class MatrixCompletionEvaluator:
 
     def _save_history(self, model_name, fold, iter_history, final_metric, total_fit_time):
         """
-        保存历史为 npz：包含 iter_history (N x 2), final_metric, total_fit_time
+        保存历史为npz
+        包含iter_history (Nx2), final_metric, total_fit_time
         """
         safe_name = model_name.replace(" ", "_").replace("/", "_")
         path = os.path.join(self.history_dir, f"{safe_name}_fold{fold}_history.npz")
@@ -485,10 +475,8 @@ class MatrixCompletionEvaluator:
 
     def evaluate(self, model_class, model_params, model_name=""):
         """
-        原 evaluate 基本逻辑保持不变，但在计时前后进行 GPU 同步并保存模型训练历史。
-        返回：rmse_list, avg_rmse, avg_time
-        并且会在 history_dir 中保存每折对应的历史 npz 文件，文件名形如：
-            history/{model_name}_fold{fold}_history.npz
+        :return rmse_list, avg_rmse, avg_time
+        并且会在/history中保存每折对应的历史npz文件，文件名形如history/{model_name}_fold{fold}_history.npz
         """
         rmse_list = []
         times = []
@@ -501,7 +489,7 @@ class MatrixCompletionEvaluator:
                 test_df = pd.read_csv(f"test_set_fold{fold}.csv", engine='python')
                 print(f"Train shape: {train_matrix.shape}, nnz={train_matrix.nnz}, test size={len(test_df)}")
 
-                # 建模与计时：在计时前后进行 GPU 同步，确保计时公平
+                # 建模与计时：在计时前后进行GPU同步，确保计时公平
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 start = time.time()
@@ -519,7 +507,7 @@ class MatrixCompletionEvaluator:
                 rmse_list.append(rmse)
                 times.append(t)
 
-                # 保存训练历史（如果模型提供 iter_history / final_metric / total_fit_time）
+                # 保存训练历史
                 iter_hist = getattr(model, 'iter_history', [])
                 final_metric = getattr(model, 'final_metric', np.inf)
                 total_fit_time = getattr(model, 'total_fit_time', t)
@@ -544,11 +532,6 @@ class MatrixCompletionEvaluator:
 
     @staticmethod
     def _time_to_target_from_history(iter_history, target_metric):
-        """
-        iter_history: list/ndarray of shape (N,2) or list of tuples [(elapsed, metric), ...]
-        target_metric: 希望达到的 metric（越小越好）
-        返回：第一次 elapsed where metric <= target_metric；若未达到返回 np.inf
-        """
         if iter_history is None:
             return np.inf
         arr = np.array(iter_history, dtype=np.float64)
@@ -569,28 +552,28 @@ def run_experiments():
 
     results = []
 
-    # # Soft-Impute设置
-    # soft_configs = [
-    #     {"name": "SoftImpute(rank=50)", "params": {"lambda_reg": 80, "rank": 50, "chunk_size": CHUNK_SIZE}},
-    #     {"name": "SoftImpute(rank=100)", "params": {"lambda_reg": 80, "rank": 100, "chunk_size": CHUNK_SIZE}},
-    #     {"name": "SoftImpute(rank=150)", "params": {"lambda_reg": 80, "rank": 150, "chunk_size": CHUNK_SIZE}},
-    #     {"name": "SoftImpute(rank=200)", "params": {"lambda_reg": 80, "rank": 200, "chunk_size": CHUNK_SIZE}},
-    # ]
-    #
-    # for cfg in soft_configs:
-    #     print("\n" + "-" * 60)
-    #     print(f"Running {cfg['name']}")
-    #     rmse_list, avg_rmse, avg_time = evaluator.evaluate(PyTorchSoftImpute, cfg['params'], cfg['name'])
-    #     results.append({
-    #         "Model": cfg['name'],
-    #         "Avg RMSE": avg_rmse,
-    #         "Avg Time (s)": avg_time,
-    #         "Fold 1 RMSE": rmse_list[0] if len(rmse_list) > 0 else None,
-    #         "Fold 2 RMSE": rmse_list[1] if len(rmse_list) > 1 else None,
-    #         "Fold 3 RMSE": rmse_list[2] if len(rmse_list) > 2 else None,
-    #         "Fold 4 RMSE": rmse_list[3] if len(rmse_list) > 3 else None,
-    #         "Fold 5 RMSE": rmse_list[4] if len(rmse_list) > 4 else None,
-    #     })
+    # Soft-Impute设置
+    soft_configs = [
+        {"name": "SoftImpute(rank=50)", "params": {"lambda_reg": 80, "rank": 50, "chunk_size": CHUNK_SIZE}},
+        {"name": "SoftImpute(rank=100)", "params": {"lambda_reg": 80, "rank": 100, "chunk_size": CHUNK_SIZE}},
+        {"name": "SoftImpute(rank=150)", "params": {"lambda_reg": 80, "rank": 150, "chunk_size": CHUNK_SIZE}},
+        {"name": "SoftImpute(rank=200)", "params": {"lambda_reg": 80, "rank": 200, "chunk_size": CHUNK_SIZE}},
+    ]
+
+    for cfg in soft_configs:
+        print("\n" + "-" * 60)
+        print(f"Running {cfg['name']}")
+        rmse_list, avg_rmse, avg_time = evaluator.evaluate(PyTorchSoftImpute, cfg['params'], cfg['name'])
+        results.append({
+            "Model": cfg['name'],
+            "Avg RMSE": avg_rmse,
+            "Avg Time (s)": avg_time,
+            "Fold 1 RMSE": rmse_list[0] if len(rmse_list) > 0 else None,
+            "Fold 2 RMSE": rmse_list[1] if len(rmse_list) > 1 else None,
+            "Fold 3 RMSE": rmse_list[2] if len(rmse_list) > 2 else None,
+            "Fold 4 RMSE": rmse_list[3] if len(rmse_list) > 3 else None,
+            "Fold 5 RMSE": rmse_list[4] if len(rmse_list) > 4 else None,
+        })
 
     # ALS设置
     als_configs = [
