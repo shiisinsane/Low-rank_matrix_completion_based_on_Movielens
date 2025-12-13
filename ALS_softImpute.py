@@ -123,8 +123,8 @@ class PyTorchALS:
         # 4) 初始化 U, V（优先使用截断SVD初始化，失败则回退到随机初始化）
         rng = np.random.RandomState(42)
 
-        # 我们只用较小的rank做初始化（例如 min(rank, 100)）
-        r_init = min(self.rank, 100)
+        # 我们只用较小的rank做初始化
+        r_init = min(self.rank, 200)
 
         try:
             print("Performing truncated SVD initialization ...")
@@ -223,6 +223,10 @@ class PyTorchALS:
                 print(f"[ALS] converged at iter {it+1}")
                 break
             prev_mse = mse
+
+        col_norms = np.linalg.norm(U_cpu, axis=0)
+        print("ALS U column norms (first 30):", col_norms[:30])
+        print("non-negligible cols:", np.sum(col_norms > 1e-4))
 
         # 训练结束，把U_cpu/V_cpu同步回torch用于predict
         self.U = torch.tensor(U_cpu, dtype=torch.float32, device=device)
@@ -565,31 +569,35 @@ def run_experiments():
 
     results = []
 
-    # Soft-Impute设置
-    soft_configs = [
-        {"name": "SoftImpute(svds_lambda=80_r=150)", "params": {"lambda_reg": 80, "rank": 150, "chunk_size": CHUNK_SIZE}},
-        {"name": "SoftImpute(svds_lambda=100_r=200)", "params": {"lambda_reg": 100, "rank": 200, "chunk_size": CHUNK_SIZE}},
-    ]
-
-    for cfg in soft_configs:
-        print("\n" + "-" * 60)
-        print(f"Running {cfg['name']}")
-        rmse_list, avg_rmse, avg_time = evaluator.evaluate(PyTorchSoftImpute, cfg['params'], cfg['name'])
-        results.append({
-            "Model": cfg['name'],
-            "Avg RMSE": avg_rmse,
-            "Avg Time (s)": avg_time,
-            "Fold 1 RMSE": rmse_list[0] if len(rmse_list) > 0 else None,
-            "Fold 2 RMSE": rmse_list[1] if len(rmse_list) > 1 else None,
-            "Fold 3 RMSE": rmse_list[2] if len(rmse_list) > 2 else None,
-            "Fold 4 RMSE": rmse_list[3] if len(rmse_list) > 3 else None,
-            "Fold 5 RMSE": rmse_list[4] if len(rmse_list) > 4 else None,
-        })
+    # # Soft-Impute设置
+    # soft_configs = [
+    #     {"name": "SoftImpute(rank=50)", "params": {"lambda_reg": 80, "rank": 50, "chunk_size": CHUNK_SIZE}},
+    #     {"name": "SoftImpute(rank=100)", "params": {"lambda_reg": 80, "rank": 100, "chunk_size": CHUNK_SIZE}},
+    #     {"name": "SoftImpute(rank=150)", "params": {"lambda_reg": 80, "rank": 150, "chunk_size": CHUNK_SIZE}},
+    #     {"name": "SoftImpute(rank=200)", "params": {"lambda_reg": 80, "rank": 200, "chunk_size": CHUNK_SIZE}},
+    # ]
+    #
+    # for cfg in soft_configs:
+    #     print("\n" + "-" * 60)
+    #     print(f"Running {cfg['name']}")
+    #     rmse_list, avg_rmse, avg_time = evaluator.evaluate(PyTorchSoftImpute, cfg['params'], cfg['name'])
+    #     results.append({
+    #         "Model": cfg['name'],
+    #         "Avg RMSE": avg_rmse,
+    #         "Avg Time (s)": avg_time,
+    #         "Fold 1 RMSE": rmse_list[0] if len(rmse_list) > 0 else None,
+    #         "Fold 2 RMSE": rmse_list[1] if len(rmse_list) > 1 else None,
+    #         "Fold 3 RMSE": rmse_list[2] if len(rmse_list) > 2 else None,
+    #         "Fold 4 RMSE": rmse_list[3] if len(rmse_list) > 3 else None,
+    #         "Fold 5 RMSE": rmse_list[4] if len(rmse_list) > 4 else None,
+    #     })
 
     # ALS设置
     als_configs = [
-        {"name": "ALS(rank=150)", "params": {"rank": 150, "lambda_reg": 0.02, "max_iter": 20, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
-        {"name": "ALS(rank=200)", "params": {"rank": 200, "lambda_reg": 0.02, "max_iter": 20, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
+        {"name": "ALS(rank=50)","params": {"rank": 50, "lambda_reg": 0.02, "max_iter": 15, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
+        {"name": "ALS(rank=100)", "params": {"rank": 100, "lambda_reg": 0.02, "max_iter": 15, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
+        {"name": "ALS(rank=150)", "params": {"rank": 150, "lambda_reg": 0.02, "max_iter": 15, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
+        {"name": "ALS(rank=200)", "params": {"rank": 200, "lambda_reg": 0.02, "max_iter": 15, "tol": 1e-4, "chunk_size": CHUNK_SIZE}},
     ]
 
     for cfg in als_configs:
