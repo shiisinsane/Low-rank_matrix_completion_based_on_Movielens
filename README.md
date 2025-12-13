@@ -82,18 +82,7 @@ python get_data.py
 
 #### 3）全局ID映射文件
 
-- 文件名：`id_maps.npz`
-  
-- 包含4个变量：
-  
-  | 变量名 | 类型  | 说明  |
-  | --- | --- | --- |
-  | user_map | 字典  | 原始UserID -->连续UserIdx |
-  | movie_map | 字典  | 原始MovieID -->连续MovieIdx |
-  | n_users | 整数  | 全局唯一用户总数 |
-  | n_movies | 整数  | 全局唯一电影总数 |
-  
-  仅作为备用，后续可通过该文件将模型输出的连续索引还原为原始ID。
+`id_maps.npz`仅作为备用，后续可通过该文件将模型输出的连续索引还原为原始ID。
   
 
 ### 2. 实验脚本：ALS_softImpute.py
