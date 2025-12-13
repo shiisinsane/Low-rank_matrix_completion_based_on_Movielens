@@ -31,7 +31,7 @@
 ├── time_eval.py # 评估算法的时间代价
 ├── time_analysis.csv # 时间代价对比结果
 ├── time_comparison.png # 时间对比图
-└── matrix_completion_results_final_{time}.csv # 两种算法的RMSE评价结果
+└── matrix_completion_results_final_{time}.csv # 两种算法的RMSE五折交叉验证结果
 ```
 
 ### 1. 预处理数据：get_data.py
@@ -240,6 +240,23 @@ $$
   Soft-Impute： $\lambda \in {80, 100}$，秩 $r \in {50, 100, 150, 200}$
   
   ALS： $\lambda=0.02$， 秩 $r \in {50, 100, 150, 200}$
+
+## 六、实验结果
+### 1. 预测性能
+所有算法配置都达到了非常接近的预测精度，RMSE差异在小数点后第6位。**ALS(rank=50)表现最佳，RMSE为0.943756**。根据Netflix Prize LeaderBoard提供的Baseline，**我们的所有结果均已进入了Cinematch的基线（0.9514）**，是一次成功的实验。
+### 2. 时间代价
+同时我们发现，秩参数对预测性能影响相对较小，所有秩参数设置的RMSE都基本相同；但在计算效率方面，**ALS算法在低秩参数设置下显著优于SoftImpute**，ALS(rank=50)比SoftImpute(rank=50)快约3倍（64.78s/203.28s）。随着秩参数增加，两种算法的运行时间都显著增加，如图所示：
+
+![time_result](time_comparison.png)
+
+更加详细的训练结果请见`/history`和`matrix_completion_results_final_xxxx.csv`。
+### 3. 启示
+针对这个结果，我们对未来可能继续进行的改进工作有如下认识：
+
+- 可以测试更多的算法配置和参数组合，或使用网格法来调超参
+- 在更大规模的数据集上进行验证
+- 探索其他矩阵补全算法的性能
+- 研究特征工程对提升预测性能的影响。因为我们现在只使用了数据集中user/movie/ratings三个维度来进行训练和评估，但数据集中还有一些额外信息，比如`movies.dat`和`tag.dat`，以及时间指标`Timestamp`，可以进一步结合这些side info来改善RMSE
 
 
 ## 附录1: 参考资料
