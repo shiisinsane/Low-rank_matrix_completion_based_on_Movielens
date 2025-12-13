@@ -11,3 +11,8 @@ k-fold/
 !time_analysis.csv
 !matrix_completion_results_final_20251212_225656.csv
 !matrix_completion_results_final_20251213_004124.csv
+
+*.html
+*.tmp
+*.pl
+*.sh
